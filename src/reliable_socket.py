@@ -1,144 +1,190 @@
-from packet import Packet, g_max_packet_size
+from packet import Packet
+from rtt_estimator import RttEstimator
 
+from socket import socket, AF_INET, SOCK_DGRAM
 from datetime import datetime
-from socket import socket, timeout, AF_INET, SOCK_DGRAM
-
-g_sync_timeout = 1.0 # seconds
+from threading import Thread, Lock
 
 class ReliableSocket:
-  sock: socket
-  connection: tuple[str, int] | None
-  estimated_rtt: float
-  dev_rtt: float
-  send_base: int
-  recv_base: int
-  recv_window: int
-
   def __init__(self):
     self.sock = socket(AF_INET, SOCK_DGRAM)
-    self.connection = None
-    self.estimated_rtt = -1.0
-    self.dev_rtt = -1.0
+    self.sock.setblocking(False)
+    self.connection: tuple[str, int] | None = None
+    self.rtt_estimator = RttEstimator()
+    self.timer = datetime.now()
+    self.timeout: float | None = None
+    self.received: list[Packet] = []
+    self.to_send: list[Packet] = []
     self.send_base = 0
+    self.send_next = 0
+    self.send_window = -1
     self.recv_base = 0
-    self.recv_window = 1
+    self.recv_window = 100
+    self.congestion_window = 1
+    self.slow_start_threshold = 16
+    self.loop_thread = Thread(target=self.loop, daemon=True)
+    self.to_send_lock = Lock()
+    self.received_lock = Lock()
   
-  def connect(self, ip: str, port: int): 
-    syn = Packet(self.send_base, 0, 0, False, True, False, b'')
-    self.sync(syn, (ip, port))
+  def connect(self, ip: str, port: int):
+    self.connection = (ip, port)
+    syn = Packet(self.send_next, 0, self.recv_window, False, True, False, b'')
+    self.sock.sendto(syn.pack(), self.connection)
+    self.to_send.append(syn)
+    self.send_next += 1
+    self.loop_thread.start()
+
+    base = self.send_base
+    while base == self.send_base:
+      pass
 
   def listen(self, ip: str, port: int):
     self.sock.bind((ip, port)) 
-    self.sock.settimeout(None)
+    self.loop_thread.start()
 
-    while True:
-      received, addr = self.sock.recvfrom(16)
-      received = Packet.unpack(received)
+    base = self.send_base
+    while base == self.send_base:
+      pass
 
-      if received.syn:
-        self.recv_base = received.seq_num + 1
-        syn_ack = Packet(self.send_base, received.seq_num + 1, 0, True, True, False, b'')
-        self.sync(syn_ack, addr)
-        break
+  def finish(self):
+    if self.connection is None:
+      return
+
+    with self.to_send_lock:
+      seq_num = self.send_base + len(self.to_send)
+      window_size = self.recv_window - len(self.received)
+      fin = Packet(seq_num, 0, window_size, False, False, True, b'')
+      self.to_send.append(fin)
+      self.send_available()
+    
+    while self.send_base <= seq_num:
+      pass
   
-  def sync(self, syn: Packet, target: tuple[str, int]):
-    self.sock.sendto(syn.pack(), target)
-    self.sock.settimeout(g_sync_timeout)
-    start = datetime.now()
-
-    while self.connection is None:
-      try:
-        received, addr = self.sock.recvfrom(16)
-
-        if addr != target:
-          continue
-
-        received = Packet.unpack(received)
-
-        if received.ack and received.ack_num == self.send_base + 1:
-          self.connection = addr
-          self.estimated_rtt = (datetime.now() - start).total_seconds()
-          self.dev_rtt = 0.25 * self.estimated_rtt
-          self.send_base += 1
-
-          if received.syn:
-            self.recv_base = received.seq_num + 1
-            ack = Packet(0, received.seq_num + 1, 0, True, False, False, b'')
-            self.sock.sendto(ack.pack(), addr)
-
-      except timeout:
-        self.sock.sendto(syn.pack(), target)
-
-        curr = self.sock.gettimeout()
-        self.sock.settimeout(curr * 2)
-        start = datetime.now()
-
   def send(self, data: bytes):
-    if not self.connection:
-      raise Exception('No connection established')
+    if self.connection is None:
+      return
 
     packets = Packet.split(data)
 
-    for i in range(min(self.recv_window, len(packets))): # change to min(self.recv_window, self.congestion_window)
-      packets[i].seq_num = self.send_base + i
-      self.sock.sendto(packets[i].pack(), self.connection)
-
-    local_base = 0
-    next_seq_num = self.recv_window
-
-    self.sock.settimeout(self.estimated_rtt + 4 * self.dev_rtt)
-    start = datetime.now()
-
-    while local_base < len(packets):
-      try:
-        received, addr = self.sock.recvfrom(g_max_packet_size)
-
-        if addr != self.connection:
-          continue
-
-        received = Packet.unpack(received)
-
-        if received.ack and received.ack_num > self.send_base:
-          diff = received.ack_num - self.send_base
-          local_base += diff
-          self.recv_window = received.window_size
-          self.send_base = received.ack_num
-          self.estimated_rtt = 0.875 * self.estimated_rtt + 0.125 * (datetime.now() - start).total_seconds()
-          self.dev_rtt = 0.75 * self.dev_rtt + 0.25 * abs((datetime.now() - start).total_seconds() - self.estimated_rtt)
-          self.sock.settimeout(self.estimated_rtt + 4 * self.dev_rtt)
-
-      except timeout:
-        for i in range(local_base, min(local_base + self.recv_window, len(packets))):
-          packets[i].seq_num = self.send_base + i
-          self.sock.sendto(packets[i].pack(), self.connection)
-        
-        curr = self.sock.gettimeout()
-        self.sock.settimeout(curr * 2)
-        start = datetime.now()
+    with self.to_send_lock:
+      for packet in packets:
+        packet.seq_num = self.send_base + len(self.to_send)
+        self.to_send.append(packet);
+  
+      self.send_available()
 
   def receive(self, max_packets: int):
-    if not self.connection:
-      raise Exception('No connection established')
-    
-    data = b''
-    packets = 0
+    if self.connection is None:
+      return
 
-    self.sock.settimeout(None)
+    while len(self.received) == 0:
+      pass
 
-    while packets < max_packets:
-      received, addr = self.sock.recvfrom(g_max_packet_size)
+    with self.received_lock:
+      data = b''
+      max = min(max_packets, len(self.received))
+      for i in range(max):
+        data += self.received[i].data
 
-      if addr != self.connection:
-        continue
-
-      received = Packet.unpack(received)
-
-      if received.seq_num == self.recv_base:
-        data += received.data
-        self.recv_base += 1
-        packets += 1
-
-      ack = Packet(0, self.recv_base, max_packets - packets, True, False, False, b'')
-      self.sock.sendto(ack.pack(), addr)
+      self.received = self.received[max:]
 
     return data
+
+  def send_available(self):
+    while self.send_next < self.send_base + self.send_window:
+      index = self.send_next - self.send_base
+      if index == len(self.to_send):
+        break
+      print('Sending packet ', self.to_send[index].seq_num)
+      self.sock.sendto(self.to_send[index].pack(), self.connection)
+      self.send_next += 1
+
+    if self.timeout is None and self.send_window > 0 and len(self.to_send) > 0:
+      self.timer = datetime.now()
+      self.timeout = 1.0
+
+  def loop(self):
+    if self.connection is not None:
+      self.timer = datetime.now()
+      self.timeout = 1.0
+
+    while True:
+      if self.timeout is not None and (datetime.now() - self.timer).total_seconds() > self.timeout:
+        self.timer = datetime.now()
+
+        if self.send_window == 0:
+          probe = Packet(0, 0, 0, False, False, False, b'')
+          self.sock.sendto(probe.pack(), self.connection)
+        else:
+          self.slow_start_threshold = self.congestion_window // 2
+          self.congestion_window = 1
+
+          self.send_window = min(self.send_window, self.congestion_window)
+
+          for i in range(min(self.send_window, len(self.to_send))):
+            self.sock.sendto(self.to_send[i].pack(), self.connection)
+
+      try:
+        packet, addr = self.sock.recvfrom(Packet.max_size)
+      except BlockingIOError:
+        continue
+
+      packet = Packet.unpack(packet)
+
+      if self.connection is None:
+        if packet.syn:
+          self.connection = addr
+          self.recv_base = packet.seq_num + 1
+          self.send_window = min(packet.window_size, self.congestion_window)
+
+          syn_ack = Packet(self.send_next, packet.seq_num + 1, self.recv_window, True, True, False, b'')
+          self.sock.sendto(syn_ack.pack(), self.connection)
+          self.to_send.append(syn_ack)
+          self.send_next += 1
+          self.timer = datetime.now()
+          self.timeout = 1.0
+      
+      elif addr == self.connection:
+        if packet.fin:
+          ack = Packet(0, packet.seq_num + 1, 0, True, False, False, b'')
+          self.sock.sendto(ack.pack(), self.connection)
+
+        elif packet.syn:
+          self.recv_base = packet.seq_num + 1
+          self.send_window = min(packet.window_size, self.congestion_window)
+          ack = Packet(0, packet.seq_num + 1, self.recv_window, True, False, False, b'')
+          self.sock.sendto(ack.pack(), self.connection)
+
+        else:
+          with self.received_lock:
+            if packet.seq_num == self.recv_base:
+                self.received.append(packet)
+                self.recv_base += 1
+            
+            ack = Packet(0, self.recv_base, self.recv_window - len(self.received), True, False, False, b'')
+            self.sock.sendto(ack.pack(), self.connection)
+        
+        if packet.ack and packet.ack_num > self.send_base:
+          print(f'Packet {packet.ack_num - 1} acked, window size: {packet.window_size}, congestion window: {self.congestion_window}, length of to_send: {len(self.to_send)}')
+          with self.to_send_lock:
+            num_acked = packet.ack_num - self.send_base
+            self.to_send = self.to_send[num_acked:]
+            self.send_base = packet.ack_num
+
+            self.send_window = min(packet.window_size, self.congestion_window)
+
+            if self.congestion_window < self.slow_start_threshold:
+              self.congestion_window *= 2
+            else:
+              self.congestion_window += 1
+
+            self.send_available()
+
+            if len(self.to_send) == 0: # All packets acked, just wait for more to send
+              self.timeout = None
+            elif self.send_window == 0:
+              self.timeout = 1.0 # Wait 1.0 sec to send probe
+            else:
+              sample_rtt = (datetime.now() - self.timer).total_seconds()
+              self.rtt_estimator.update(sample_rtt)
+              self.timeout = self.rtt_estimator.timeout()

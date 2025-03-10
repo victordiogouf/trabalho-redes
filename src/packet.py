@@ -1,10 +1,10 @@
 from struct import pack, unpack
 
-g_packet_header_size = 11 # bytes
-g_max_packet_data_size = 2 # bytes
-g_max_packet_size = g_packet_header_size + g_max_packet_data_size # bytes
-
 class Packet:
+  header_size = 11 # bytes
+  max_data_size = 2 # bytes
+  max_size = header_size + max_data_size # bytes
+
   seq_num: int
   ack_num: int
   window_size: int
@@ -40,6 +40,6 @@ class Packet:
   @staticmethod
   def split(data: bytes):
     packets: list[Packet] = []
-    for i in range(0, len(data), g_max_packet_data_size):
-      packets.append(Packet(0, 0, 0, False, False, False, data[i:i+g_max_packet_data_size]))
+    for i in range(0, len(data), Packet.max_data_size):
+      packets.append(Packet(0, 0, 0, False, False, False, data[i:i+Packet.max_data_size]))
     return packets
