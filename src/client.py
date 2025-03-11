@@ -6,7 +6,7 @@ def main():
 
   print('Connected to server')
 
-  client.send(b'Hello, server!')
+  client.send(b'Hello, world! I am a client.')
 
   client.finish()
 

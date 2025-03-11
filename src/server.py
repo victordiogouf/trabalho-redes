@@ -7,8 +7,13 @@ def main():
   print('Connected to client')
 
   while True:
-    data = server.receive(10)
+    try:
+      data = server.receive(10)
 
-    print(data)
-  
+      print(data)
+    except KeyboardInterrupt:
+      break
+
+  server.finish()
+
 main()
