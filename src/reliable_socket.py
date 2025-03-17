@@ -15,6 +15,7 @@ class ReliableSocket:
     self.timer = datetime.now()
     self.timeout: float | None = None
     self.received: bytes = b''
+    self.incomplete: bytes = b''
     self.to_send: bytes = b''
     self.send_base = 1
     self.send_next = 1
@@ -100,7 +101,18 @@ class ReliableSocket:
       data = self.received[:size]
       self.received = self.received[size:]
 
-    return data
+    data = self.incomplete + data
+
+    try:
+        decoded_text = data.decode()
+        self.incomplete = b""
+    except UnicodeDecodeError as e:
+        valid_up_to = e.start
+        decoded_text = data[:valid_up_to].decode()
+        self.incomplete = data[valid_up_to:]
+
+    return decoded_text.encode()
+
 
   def send_not_sent(self):
     sent_something = False
@@ -179,10 +191,10 @@ class ReliableSocket:
       packet, addr = self.udp_socket.recvfrom(Packet.max_size)
       packet = Packet.unpack(packet)
       # simulate packet loss
-      if random() < 0.4:
-        print('[LOST]', packet)
-        return
-      print('[RECV]', packet)
+      # if random() < 0.1:
+      #   print('[LOST]', packet)
+      #   return
+      # print('[RECV]', packet)
       self.check_packet(packet, addr)
     except (BlockingIOError, ConnectionResetError):
       pass
