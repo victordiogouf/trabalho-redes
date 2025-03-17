@@ -6,7 +6,7 @@ def main():
 
   print('Connected to server')
 
-  f = open('input.txt', 'rt')
+  f = open('../input.txt', 'rt', encoding='utf-8')
   data = f.read()
   f.close()
   client.send(data.encode())
