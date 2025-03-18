@@ -13,11 +13,11 @@ def main():
   while True:
     try:
       data = server.receive(10)
-      if len(data.decode()) == 0 and server.received_fin:
+      if server.received_fin:
         server.finish()
         print('Waiting for new connection...')
         f = open('output.txt', 'at')
-        f.write('\n')
+        f.write('\n\n\n\n\n')
         f.close()
         server.listen('127.0.0.1', 5555)
         continue
@@ -27,10 +27,8 @@ def main():
 
     except KeyboardInterrupt:
       print("\n")
-      server.finish()
       break
-  
-  print("\nFim da conexão")
+
   return
 
 main()
