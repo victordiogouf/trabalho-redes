@@ -191,10 +191,10 @@ class ReliableSocket:
       packet, addr = self.udp_socket.recvfrom(Packet.max_size)
       packet = Packet.unpack(packet)
       # simulate packet loss
-      # if random() < 0.1:
-      #   print('[LOST]', packet)
-      #   return
-      # print('[RECV]', packet)
+      if random() < 0.05:
+        print('[LOST]', packet)
+        return
+      print('[RECV]', packet)
       self.check_packet(packet, addr)
     except (BlockingIOError, ConnectionResetError):
       pass
